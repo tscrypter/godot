@@ -39,7 +39,12 @@ namespace Godot.Bridge
 
             try
             {
-                Type nativeType = TypeGetProxyClass(nativeTypeName);
+                using var stringName = StringName.CreateTakingOwnershipOfDisposableValue(
+                    NativeFuncs.godotsharp_string_name_new_copy(CustomUnsafe.AsRef(nativeTypeName)));
+                string nativeTypeNameStr = stringName.ToString();
+
+                Type nativeType = TypeGetProxyClass(nativeTypeNameStr) ?? throw new InvalidOperationException(
+                    "Wrapper class not found for type: " + nativeTypeNameStr);
                 var obj = (Object)FormatterServices.GetUninitializedObject(nativeType);
 
                 var ctor = nativeType.GetConstructor(
@@ -187,12 +192,9 @@ namespace Godot.Bridge
             }
         }
 
-        private static unsafe Type TypeGetProxyClass(godot_string_name* nativeTypeName)
+        private static Type TypeGetProxyClass(string nativeTypeNameStr)
         {
             // Performance is not critical here as this will be replaced with a generated dictionary.
-            using var stringName = StringName.CreateTakingOwnershipOfDisposableValue(
-                NativeFuncs.godotsharp_string_name_new_copy(CustomUnsafe.AsRef(nativeTypeName)));
-            string nativeTypeNameStr = stringName.ToString();
 
             if (nativeTypeNameStr[0] == '_')
                 nativeTypeNameStr = nativeTypeNameStr.Substring(1);
@@ -202,7 +204,7 @@ namespace Godot.Bridge
             if (wrapperType == null)
             {
                 wrapperType = AppDomain.CurrentDomain.GetAssemblies()
-                    .First(a => a.GetName().Name == "GodotSharpEditor")
+                    .FirstOrDefault(a => a.GetName().Name == "GodotSharpEditor")?
                     .GetType("Godot." + nativeTypeNameStr);
             }
 
