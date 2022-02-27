@@ -12,22 +12,11 @@ namespace Godot.Bridge
 {
     public static class ScriptManagerBridge
     {
-        private static System.Collections.Generic.Dictionary<string, ScriptLookupInfo> _scriptLookupMap = new();
-        private static System.Collections.Generic.Dictionary<IntPtr, Type> _scriptBridgeMap = new();
+        private static System.Collections.Generic.Dictionary<string, Type> _pathScriptMap = new();
 
-        private struct ScriptLookupInfo
-        {
-            public string ClassNamespace { get; private set; }
-            public string ClassName { get; private set; }
-            public Type ScriptType { get; private set; }
-
-            public ScriptLookupInfo(string classNamespace, string className, Type scriptType)
-            {
-                ClassNamespace = classNamespace;
-                ClassName = className;
-                ScriptType = scriptType;
-            }
-        };
+        private static readonly object ScriptBridgeLock = new();
+        private static System.Collections.Generic.Dictionary<IntPtr, Type> _scriptTypeMap = new();
+        private static System.Collections.Generic.Dictionary<Type, IntPtr> _typeScriptMap = new();
 
         [UnmanagedCallersOnly]
         internal static void FrameCallback()
@@ -88,7 +77,7 @@ namespace Godot.Bridge
             try
             {
                 // Performance is not critical here as this will be replaced with source generators.
-                Type scriptType = _scriptBridgeMap[scriptPtr];
+                Type scriptType = _scriptTypeMap[scriptPtr];
                 var obj = (Object)FormatterServices.GetUninitializedObject(scriptType);
 
                 var ctor = scriptType
@@ -149,7 +138,7 @@ namespace Godot.Bridge
             try
             {
                 // Performance is not critical here as this will be replaced with source generators.
-                if (!_scriptBridgeMap.TryGetValue(scriptPtr, out var scriptType))
+                if (!_scriptTypeMap.TryGetValue(scriptPtr, out var scriptType))
                 {
                     *outRes = default;
                     return;
@@ -241,7 +230,7 @@ namespace Godot.Bridge
                 if (scriptPathAttr == null)
                     return;
 
-                _scriptLookupMap[scriptPathAttr.Path] = new ScriptLookupInfo(type.Namespace, type.Name, type);
+                _pathScriptMap[scriptPathAttr.Path] = type;
             }
 
             var assemblyHasScriptsAttr = assembly.GetCustomAttributes(inherit: false)
@@ -320,7 +309,7 @@ namespace Godot.Bridge
                 // Performance is not critical here as this will be replaced with source generators.
                 using var signals = new Dictionary();
 
-                Type top = _scriptBridgeMap[scriptPtr];
+                Type top = _scriptTypeMap[scriptPtr];
                 Type native = Object.InternalGetClassNativeBase(top);
 
                 while (top != null && top != native)
@@ -416,7 +405,7 @@ namespace Godot.Bridge
 
                 string signalNameStr = Marshaling.ConvertStringToManaged(*signalName);
 
-                Type top = _scriptBridgeMap[scriptPtr];
+                Type top = _scriptTypeMap[scriptPtr];
                 Type native = Object.InternalGetClassNativeBase(top);
 
                 while (top != null && top != native)
@@ -462,10 +451,10 @@ namespace Godot.Bridge
         {
             try
             {
-                if (!_scriptBridgeMap.TryGetValue(scriptPtr, out var scriptType))
+                if (!_scriptTypeMap.TryGetValue(scriptPtr, out var scriptType))
                     return false.ToGodotBool();
 
-                if (!_scriptBridgeMap.TryGetValue(scriptPtrMaybeBase, out var maybeBaseType))
+                if (!_scriptTypeMap.TryGetValue(scriptPtrMaybeBase, out var maybeBaseType))
                     return false.ToGodotBool();
 
                 return (scriptType == maybeBaseType || maybeBaseType.IsAssignableFrom(scriptType)).ToGodotBool();
@@ -482,12 +471,19 @@ namespace Godot.Bridge
         {
             try
             {
-                string scriptPathStr = Marshaling.ConvertStringToManaged(*scriptPath);
+                lock (ScriptBridgeLock)
+                {
+                    if (!_scriptTypeMap.ContainsKey(scriptPtr))
+                    {
+                        string scriptPathStr = Marshaling.ConvertStringToManaged(*scriptPath);
 
-                if (!_scriptLookupMap.TryGetValue(scriptPathStr, out var lookupInfo))
-                    return false.ToGodotBool();
+                        if (!_pathScriptMap.TryGetValue(scriptPathStr, out Type scriptType))
+                            return false.ToGodotBool();
 
-                _scriptBridgeMap.Add(scriptPtr, lookupInfo.ScriptType);
+                        _scriptTypeMap.Add(scriptPtr, scriptType);
+                        _typeScriptMap.Add(scriptType, scriptPtr);
+                    }
+                }
 
                 return true.ToGodotBool();
             }
@@ -498,15 +494,49 @@ namespace Godot.Bridge
             }
         }
 
-        internal static void AddScriptBridgeWithType(IntPtr scriptPtr, Type scriptType)
-            => _scriptBridgeMap.Add(scriptPtr, scriptType);
+        [UnmanagedCallersOnly]
+        internal static unsafe void GetOrCreateScriptBridgeForPath(godot_string* scriptPath, godot_ref* outScript)
+        {
+            string scriptPathStr = Marshaling.ConvertStringToManaged(*scriptPath);
+
+            if (!_pathScriptMap.TryGetValue(scriptPathStr, out Type scriptType))
+            {
+                NativeFuncs.godotsharp_internal_new_csharp_script(outScript);
+                return;
+            }
+
+            GetOrCreateScriptBridgeForType(scriptType, outScript);
+        }
+
+        internal static unsafe void GetOrCreateScriptBridgeForType(Type scriptType, godot_ref* outScript)
+        {
+            lock (ScriptBridgeLock)
+            {
+                if (_typeScriptMap.TryGetValue(scriptType, out IntPtr scriptPtr))
+                {
+                    NativeFuncs.godotsharp_ref_new_from_ref_counted_ptr(out *outScript, scriptPtr);
+                    return;
+                }
+
+                NativeFuncs.godotsharp_internal_new_csharp_script(outScript);
+                scriptPtr = outScript->Reference;
+
+                _scriptTypeMap.Add(scriptPtr, scriptType);
+                _typeScriptMap.Add(scriptType, scriptPtr);
+
+                NativeFuncs.godotsharp_internal_reload_registered_script(scriptPtr);
+            }
+        }
 
         [UnmanagedCallersOnly]
         internal static void RemoveScriptBridge(IntPtr scriptPtr)
         {
             try
             {
-                _scriptBridgeMap.Remove(scriptPtr);
+                lock (ScriptBridgeLock)
+                {
+                    _ = _scriptTypeMap.Remove(scriptPtr);
+                }
             }
             catch (Exception e)
             {
@@ -521,7 +551,7 @@ namespace Godot.Bridge
             try
             {
                 // Performance is not critical here as this will be replaced with source generators.
-                var scriptType = _scriptBridgeMap[scriptPtr];
+                var scriptType = _scriptTypeMap[scriptPtr];
 
                 *outTool = scriptType.GetCustomAttributes(inherit: false)
                     .OfType<ToolAttribute>()
@@ -646,7 +676,7 @@ namespace Godot.Bridge
         {
             try
             {
-                Type scriptType = _scriptBridgeMap[scriptPtr];
+                Type scriptType = _scriptTypeMap[scriptPtr];
                 GetPropertyInfoListForType(scriptType, scriptPtr, addPropInfoFunc);
             }
             catch (Exception e)
@@ -768,7 +798,7 @@ namespace Godot.Bridge
         {
             try
             {
-                Type top = _scriptBridgeMap[scriptPtr];
+                Type top = _scriptTypeMap[scriptPtr];
                 Type native = Object.InternalGetClassNativeBase(top);
 
                 while (top != null && top != native)
