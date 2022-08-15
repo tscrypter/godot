@@ -54,20 +54,29 @@ def configure(env, env_mono):
     if not app_host_version:
         raise RuntimeError("Cannot find .NET app host for version: " + dotnet_version)
 
-    app_host_dir = os.path.join(
-        dotnet_root,
-        "packs",
-        "Microsoft.NETCore.App.Host." + runtime_identifier,
-        app_host_version,
-        "runtimes",
-        runtime_identifier,
-        "native",
-    )
+    def get_runtime_path():
+        return os.path.join(
+            dotnet_root,
+            "packs",
+            "Microsoft.NETCore.App.Host." + runtime_identifier,
+            app_host_version,
+            "runtimes",
+            runtime_identifier,
+            "native",
+            )
 
     def check_app_host_file_exists(file):
         file_path = os.path.join(app_host_dir, file)
         if not os.path.isfile(file_path):
             raise RuntimeError("File not found: " + file_path)
+
+    app_host_dir = get_runtime_path()
+
+    # some linux distros use their distro name as the RID in these paths, some don't
+    # if the initial generic path doesn't exist, get the rid from `dotnet --info`
+    if not os.path.isdir(app_host_dir):
+        runtime_identifier = find_dotnet_cli_rid(dotnet_cmd)
+        app_host_dir = get_runtime_path()
 
     # TODO:
     # All libnethost does for us is provide a function to find hostfxr.
@@ -163,6 +172,31 @@ def find_app_host_version(dotnet_cmd, search_version_str):
     return ""
 
 
+def find_dotnet_cli_rid(dotnet_cmd):
+    import subprocess
+
+    try:
+        env = dict(os.environ, DOTNET_CLI_UI_LANGUAGE="en-US")
+        lines = subprocess.check_output([dotnet_cmd, "--info"], env=env).splitlines()
+
+        for line_bytes in lines:
+            line = line_bytes.decode("utf-8")
+            if not line.startswith(" RID:"):
+                continue
+
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+
+            return parts[1]
+    except (subprocess.CalledProcessError, OSError) as e:
+        import sys
+
+        print(e, file=sys.stderr)
+
+    return ""
+
+
 def find_dotnet_sdk(dotnet_cmd, search_version_str):
     import subprocess
     from distutils.version import LooseVersion
@@ -188,7 +222,7 @@ def find_dotnet_sdk(dotnet_cmd, search_version_str):
                 continue
 
             path_part = parts[1]
-            return path_part[1 : path_part.find("]")]
+            return path_part[1: path_part.find("]")]
     except (subprocess.CalledProcessError, OSError) as e:
         import sys
 
