@@ -52,6 +52,9 @@ static String get_type_name(const PropertyInfo &p_info) {
 	if (p_info.type == Variant::INT && (p_info.usage & (PROPERTY_USAGE_CLASS_IS_BITFIELD))) {
 		return String("bitfield::") + String(p_info.class_name);
 	}
+	if (p_info.type == Variant::INT && (p_info.usage & PROPERTY_USAGE_ARRAY)) {
+		return "int";
+	}
 	if (p_info.class_name != StringName()) {
 		return p_info.class_name;
 	}
