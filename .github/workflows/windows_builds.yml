@@ -22,6 +22,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: Editor w Mono (target=release_debug, tools=yes, tests=yes)
+            cache-name: linux-editor-mono
+            target: release_debug
+            tools: true
+            tests: false # Disabled due freeze caused by mix Mono build and CI
+            sconsflags: module_mono_enabled=yes
+            doc-test: true
+            bin: "./bin/godot.windows.opt.tools.x86_64.exe"
+            build-mono: true
+            proj-conv: true
+            artifact: true
+
           - name: Editor (target=release_debug, tools=yes, tests=yes)
             cache-name: windows-editor
             target: release_debug
